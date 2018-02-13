@@ -5,11 +5,17 @@
 #include "mmu.h"
 #include "proc.h"
 #include "elf.h"
+#include "spinlock.h"
 
 extern char data[];  // defined in data.S
 
 static pde_t *kpgdir;  // for use in scheduler()
 
+struct{
+  struct spinlock lock;
+  int count[SHMEMMAX];
+  void* addr[SHMEMMAX];
+} shmems;
 // Allocate one page table for the machine for the kernel address
 // space for scheduler processes.
 void
@@ -46,6 +52,19 @@ seginit(void)
   proc = 0;
 }
 
+// Initilize shared memory's lock, counter and addresses.
+void
+shmem_init(void)
+{
+  int i;
+  initlock(&shmems.lock, "shmems");
+  acquire(&shmems.lock);
+  for (i = 0; i < SHMEMMAX; i++) {
+    shmems.count[i] = 0;
+    shmems.addr[i] = NULL;
+  }
+  release(&shmems.lock);
+}
 // Return the address of the PTE in page table pgdir
 // that corresponds to linear address va.  If create!=0,
 // create any required page table pages.
@@ -231,7 +250,7 @@ allocuvm(pde_t *pgdir, uint oldsz, uint newsz)
   char *mem;
   uint a;
 
-  if(newsz > USERTOP)
+  if(newsz > USERTOP - PGSIZE*SHMEMMAX)
     return 0;
   if(newsz < oldsz)
     return oldsz;
@@ -286,13 +305,48 @@ freevm(pde_t *pgdir)
 
   if(pgdir == 0)
     panic("freevm: no pgdir");
-  deallocuvm(pgdir, USERTOP, 0);
+  deallocuvm(pgdir, USERTOP - SHMEMMAX*PGSIZE, 0);
   for(i = 0; i < NPDENTRIES; i++){
     if(pgdir[i] & PTE_P)
       kfree((char*)PTE_ADDR(pgdir[i]));
   }
   kfree((char*)pgdir);
 }
+
+
+void
+shmem_free(struct proc *p)
+{
+  int i;
+  acquire(&shmems.lock);
+  for (i = 0; i < SHMEMMAX; i++) {
+    // cprintf("\nshmem_free: shmems.count: %d\t p->shmem[i]: %d, name: %s\n", 
+    //         shmems.count[i], p->shmem[i], p->name);
+    if (p->shmem[i]) {
+      shmems.count[i]--;
+      // cprintf("shmem_free: addr: %p\n", shmems.addr[i]);
+      if (shmems.count[i] == 0 && shmems.addr[i])
+        kfree((char*)shmems.addr[i]);
+        shmems.addr[i] = NULL;
+    }
+    p->shmem[i] = 0;
+  }
+  release(&shmems.lock);
+}
+
+void shmem_fork(struct proc *p)
+{
+  int i;
+  acquire(&shmems.lock);
+  for (i = 0; i < SHMEMMAX; i++) {
+    if (p->shmem[i]) {
+      shmems.count[i]++;
+    }
+  }
+  release(&shmems.lock);
+}
+
+
 
 // Given a parent process's page table, create a copy
 // of it for a child.
@@ -363,4 +417,49 @@ copyout(pde_t *pgdir, uint va, void *p, uint len)
     va = va0 + PGSIZE;
   }
   return 0;
+}
+
+void*
+shmem_access(int page_number)
+{
+  void *vaddr;
+
+  if (page_number < 0 || page_number >= SHMEMMAX)
+    return NULL;
+
+  vaddr = (void*)(USERTOP - PGSIZE * (page_number + 1)); 
+
+  acquire(&shmems.lock);
+  if(proc -> shmem[page_number]) {
+      if(mappages(proc->pgdir,vaddr,PGSIZE,PADDR(shmems.addr[page_number]),PTE_W|PTE_U) < 0) {
+        release(&shmems.lock);
+        return NULL;
+    }
+    release(&shmems.lock);
+    return vaddr;
+  }
+
+  if ((shmems.addr[page_number] = kalloc()) == 0) {
+    proc->shmem[page_number] = 0;
+    release(&shmems.lock);
+    cprintf("shared memory out of memory");
+    return NULL;
+  }
+  
+  mappages(proc->pgdir, vaddr, PGSIZE, PADDR(shmems.addr[page_number]), PTE_W|PTE_U);
+  shmems.count[page_number]++;
+  proc->shmem[page_number] = 1;
+  // cprintf("\nshmem_access: name: %s\t count: %d\n", proc->name, proc->shmem[page_number]);
+  // cprintf("\nshmem_access: addr: %d\n", shmems.addr[page_number]);
+  release(&shmems.lock);
+  return vaddr;
+}
+
+int
+shmem_count(int page_number)
+{
+  if(page_number < 0 || page_number >= SHMEMMAX){
+    return -1;
+  }
+  return shmems.count[page_number];
 }

@@ -34,7 +34,7 @@ allocproc(void)
 {
   struct proc *p;
   char *sp;
-
+  int i;
   acquire(&ptable.lock);
   for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
     if(p->state == UNUSED)
@@ -68,6 +68,9 @@ found:
   memset(p->context, 0, sizeof *p->context);
   p->context->eip = (uint)forkret;
 
+  for(i = 0; i < SHMEMMAX; i++){
+    p->shmem[i] = 0;
+  }
   return p;
 }
 
@@ -156,6 +159,10 @@ fork(void)
   pid = np->pid;
   np->state = RUNNABLE;
   safestrcpy(np->name, proc->name, sizeof(proc->name));
+  for(i = 0; i < SHMEMMAX; i++){
+    np->shmem[i] = proc->shmem[i];
+  }
+  shmem_fork(np);
   return pid;
 }
 
@@ -196,6 +203,8 @@ exit(void)
     }
   }
 
+  // free the shared memory
+  shmem_free(proc);
   // Jump into the scheduler, never to return.
   proc->state = ZOMBIE;
   sched();

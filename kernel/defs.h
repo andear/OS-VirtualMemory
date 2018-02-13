@@ -109,6 +109,11 @@ void            userinit(void);
 int             wait(void);
 void            wakeup(void*);
 void            yield(void);
+void            shmem_init(void);
+void*           shmem_access(int page_number);
+int             shmem_count(int page_number);
+void            shmem_free(struct proc *p);
+void            shmem_fork(struct proc *p);
 
 // swtch.S
 void            swtch(struct context**, struct context*);
